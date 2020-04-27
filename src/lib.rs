@@ -95,6 +95,17 @@ pub fn parse(value: &mut FPValue, json: &'static str) -> Result<()> {
 mod tests {
     use crate::{FPType, FPValue, parse, ParseError};
 
+    macro_rules! test_parse_error {
+        ($error:expr, $json:expr) => {
+            let mut v = FPValue {
+                fp_type: FPType::False
+            };
+
+            assert_eq!(parse(&mut v, $json).unwrap_err(), $error);
+            assert_eq!(v.fp_type, FPType::Null);
+        };
+    }
+
     #[test]
     fn test_parse_null() {
         let mut v = FPValue {
@@ -124,42 +135,26 @@ mod tests {
 
     #[test]
     fn test_parse_except_value() {
-        let mut v = FPValue {
-            fp_type: FPType::False
-        };
-
-        assert_eq!(parse(&mut v, "").unwrap_err(), ParseError::ExpectValue);
-        assert_eq!(v.fp_type, FPType::Null);
-
-        v.fp_type = FPType::False;
-        assert_eq!(parse(&mut v, " \r \t \n").unwrap_err(), ParseError::ExpectValue);
-        assert_eq!(v.fp_type, FPType::Null);
+        test_parse_error!(ParseError::ExpectValue, "");
+        test_parse_error!(ParseError::ExpectValue, " ");
+        test_parse_error!(ParseError::ExpectValue, " \r \t \n");
     }
 
     #[test]
     fn test_parse_invalid_value() {
-        let mut v = FPValue {
-            fp_type: FPType::False
-        };
-
-
-        assert_eq!(parse(&mut v, "nul").unwrap_err(), ParseError::InvalidValue);
-        assert_eq!(v.fp_type, FPType::Null);
-
-        v.fp_type = FPType::False;
-        assert_eq!(parse(&mut v, "?").unwrap_err(), ParseError::InvalidValue);
-        assert_eq!(v.fp_type, FPType::Null);
+        test_parse_error!(ParseError::InvalidValue, "nul");
+        test_parse_error!(ParseError::InvalidValue, "?");
     }
 
     #[test]
     fn test_parse_root_not_singular() {
+        test_parse_error!(ParseError::RootNotSingular, "null x");
+        test_parse_error!(ParseError::RootNotSingular, "null ?");
+        test_parse_error!(ParseError::RootNotSingular, "null \r\n\tx");
+
         let mut v = FPValue {
             fp_type: FPType::False
         };
-
-
-        assert_eq!(parse(&mut v, "null x").unwrap_err(), ParseError::RootNotSingular);
-        assert_eq!(v.fp_type, FPType::Null);
 
         assert_eq!(parse(&mut v, "null  \r\n").is_ok(), true);
         assert_eq!(v.fp_type, FPType::Null);
