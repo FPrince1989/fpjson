@@ -47,32 +47,11 @@ impl FPContext<'_> {
         Result::Ok(())
     }
 
-    fn parse_null(&mut self, value: &mut FPValue) -> Result<()> {
-        if self.json.len() >= 4 && &self.json[0..4] == "null" {
-            self.json = &self.json[4..self.json.len()];
-            value.fp_type = FPType::Null;
-
-            Result::Ok(())
-        } else {
-            Result::Err(ParseError::InvalidValue)
-        }
-    }
-
-    fn parse_true(&mut self, value: &mut FPValue) -> Result<()> {
-        if self.json.len() >= 4 && &self.json[0..4] == "true" {
-            self.json = &self.json[4..self.json.len()];
-            value.fp_type = FPType::True;
-
-            Result::Ok(())
-        } else {
-            Result::Err(ParseError::InvalidValue)
-        }
-    }
-
-    fn parse_false(&mut self, value: &mut FPValue) -> Result<()> {
-        if self.json.len() >= 5 && &self.json[0..5] == "false" {
-            self.json = &self.json[5..self.json.len()];
-            value.fp_type = FPType::False;
+    fn parse_literal(&mut self, value: &mut FPValue, literal: &str, fp_type: FPType) -> Result<()> {
+        let len = literal.len();
+        if self.json.len() >= len && &self.json[0..len] == literal {
+            self.json = &self.json[len..self.json.len()];
+            value.fp_type = fp_type;
 
             Result::Ok(())
         } else {
@@ -83,9 +62,9 @@ impl FPContext<'_> {
     pub fn parse_value(&mut self, value: &mut FPValue) -> Result<()> {
         if let Some(c) = self.json.chars().next() {
             match c {
-                'n' => self.parse_null(value),
-                't' => self.parse_true(value),
-                'f' => self.parse_false(value),
+                'n' => self.parse_literal(value, "null", FPType::Null),
+                't' => self.parse_literal(value, "true", FPType::True),
+                'f' => self.parse_literal(value, "false", FPType::False),
                 _ => Result::Err(ParseError::InvalidValue),
             }
         } else {
