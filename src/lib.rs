@@ -96,7 +96,7 @@ mod tests {
     use crate::{FPType, FPValue, parse, ParseError};
 
     macro_rules! test_parse_error {
-        ($error:expr, $json:expr) => {
+        ($json:expr, $error:expr) => {
             let mut v = FPValue {
                 fp_type: FPType::False
             };
@@ -135,22 +135,22 @@ mod tests {
 
     #[test]
     fn test_parse_except_value() {
-        test_parse_error!(ParseError::ExpectValue, "");
-        test_parse_error!(ParseError::ExpectValue, " ");
-        test_parse_error!(ParseError::ExpectValue, " \r \t \n");
+        test_parse_error!("", ParseError::ExpectValue);
+        test_parse_error!(" ", ParseError::ExpectValue);
+        test_parse_error!(" \r \t \n", ParseError::ExpectValue);
     }
 
     #[test]
     fn test_parse_invalid_value() {
-        test_parse_error!(ParseError::InvalidValue, "nul");
-        test_parse_error!(ParseError::InvalidValue, "?");
+        test_parse_error!("nul", ParseError::InvalidValue);
+        test_parse_error!("?", ParseError::InvalidValue);
     }
 
     #[test]
     fn test_parse_root_not_singular() {
-        test_parse_error!(ParseError::RootNotSingular, "null x");
-        test_parse_error!(ParseError::RootNotSingular, "null ?");
-        test_parse_error!(ParseError::RootNotSingular, "null \r\n\tx");
+        test_parse_error!("null x", ParseError::RootNotSingular);
+        test_parse_error!("null ?", ParseError::RootNotSingular);
+        test_parse_error!("null \r\n\tx", ParseError::RootNotSingular);
 
         let mut v = FPValue {
             fp_type: FPType::False
