@@ -1,9 +1,11 @@
-#[derive(Debug, Eq, PartialEq)]
+use std::str::FromStr;
+
+#[derive(Debug, PartialEq)]
 enum FPType {
     Null,
     False,
     True,
-    Number,
+    Number(f64),
     String,
     Array,
     Object,
@@ -19,6 +21,7 @@ pub enum ParseError {
     ExpectValue,
     InvalidValue,
     RootNotSingular,
+    NumberTooBig,
 }
 
 type Result<T> = std::result::Result<T, ParseError>;
@@ -42,7 +45,7 @@ impl FPContext<'_> {
                 break;
             }
         }
-        self.json = &self.json[index..self.json.len()];
+        self.json = &self.json[index..];
 
         Result::Ok(())
     }
@@ -50,11 +53,75 @@ impl FPContext<'_> {
     fn parse_literal(&mut self, value: &mut FPValue, literal: &str, fp_type: FPType) -> Result<()> {
         let len = literal.len();
         if self.json.len() >= len && &self.json[0..len] == literal {
-            self.json = &self.json[len..self.json.len()];
+            self.json = &self.json[len..];
             value.fp_type = fp_type;
 
             Result::Ok(())
         } else {
+            Result::Err(ParseError::InvalidValue)
+        }
+    }
+
+    fn parse_number(&mut self, value: &mut FPValue) -> Result<()> {
+        let mut char_indices_iter = self.json.char_indices();
+        let mut current = char_indices_iter.next();
+        // 负号处理
+        if current.is_some() && current.unwrap().1 == '-' {
+            current = char_indices_iter.next();
+        }
+        // 整数部分处理
+        if current.is_some() && current.unwrap().1 == '0' {
+            current = char_indices_iter.next();
+        } else {
+            if !(current.is_some() && current.unwrap().1.is_ascii_digit()) {
+                let index = current.unwrap_or((self.json.len(), char::default())).0;
+                self.json = &self.json[index..];
+                return Result::Err(ParseError::InvalidValue);
+            }
+            while current.is_some() && current.unwrap().1.is_ascii_digit() {
+                current = char_indices_iter.next();
+            }
+        }
+        // 小数部分处理
+        if current.is_some() && current.unwrap().1 == '.' {
+            current = char_indices_iter.next();
+            if !(current.is_some() && current.unwrap().1.is_ascii_digit()) {
+                let index = current.unwrap_or((self.json.len(), char::default())).0;
+                self.json = &self.json[index..];
+                return Result::Err(ParseError::InvalidValue);
+            }
+            while current.is_some() && current.unwrap().1.is_ascii_digit() {
+                current = char_indices_iter.next();
+            }
+        }
+        // 指数部分处理
+        if current.is_some() && (current.unwrap().1 == 'e' || current.unwrap().1 == 'E') {
+            current = char_indices_iter.next();
+            if current.is_some() && (current.unwrap().1 == '+' || current.unwrap().1 == '-') {
+                current = char_indices_iter.next();
+            }
+            if !(current.is_some() && current.unwrap().1.is_ascii_digit()) {
+                let index = current.unwrap_or((self.json.len(), char::default())).0;
+                self.json = &self.json[index..];
+                return Result::Err(ParseError::InvalidValue);
+            }
+            while current.is_some() && current.unwrap().1.is_ascii_digit() {
+                current = char_indices_iter.next();
+            }
+        }
+
+        let index = current.unwrap_or((self.json.len(), char::default())).0;
+
+        if let Ok(number) = f64::from_str(&self.json[..index]) {
+            if number.is_infinite() {
+                return Result::Err(ParseError::NumberTooBig);
+            }
+            value.fp_type = FPType::Number(number);
+            self.json = &self.json[index..];
+
+            Result::Ok(())
+        } else {
+            self.json = &self.json[index..];
             Result::Err(ParseError::InvalidValue)
         }
     }
@@ -65,7 +132,7 @@ impl FPContext<'_> {
                 'n' => self.parse_literal(value, "null", FPType::Null),
                 't' => self.parse_literal(value, "true", FPType::True),
                 'f' => self.parse_literal(value, "false", FPType::False),
-                _ => Result::Err(ParseError::InvalidValue),
+                _ => self.parse_number(value),
             }
         } else {
             Result::Err(ParseError::ExpectValue)
@@ -81,6 +148,7 @@ pub fn parse(value: &mut FPValue, json: &'static str) -> Result<()> {
         Ok(()) => {
             context.parse_whitespace()?;
             if !context.json.is_empty() {
+                value.fp_type = FPType::Null;
                 Result::Err(ParseError::RootNotSingular)
             } else {
                 Result::Ok(())
@@ -106,12 +174,27 @@ mod tests {
         };
     }
 
+    macro_rules! test_parse_number {
+        ($json:expr, $number:expr) => {
+            let mut v = FPValue {
+                fp_type: FPType::False
+            };
+
+            assert!(parse(&mut v, $json).is_ok());
+            assert_eq!(v.fp_type, FPType::Number($number));
+        };
+    }
+
     #[test]
     fn test_parse_null() {
         let mut v = FPValue {
             fp_type: FPType::False
         };
         assert!(parse(&mut v, "null").is_ok());
+        assert_eq!(v.fp_type, FPType::Null);
+
+        v.fp_type = FPType::False;
+        assert_eq!(parse(&mut v, "null  \r\n").is_ok(), true);
         assert_eq!(v.fp_type, FPType::Null);
     }
 
@@ -122,6 +205,10 @@ mod tests {
         };
         assert!(parse(&mut v, "true").is_ok());
         assert_eq!(v.fp_type, FPType::True);
+
+        v.fp_type = FPType::Null;
+        assert_eq!(parse(&mut v, "\t true  \r\n").is_ok(), true);
+        assert_eq!(v.fp_type, FPType::True);
     }
 
     #[test]
@@ -130,6 +217,10 @@ mod tests {
             fp_type: FPType::True
         };
         assert_eq!(parse(&mut v, "false").is_ok(), true);
+        assert_eq!(v.fp_type, FPType::False);
+
+        v.fp_type = FPType::Null;
+        assert_eq!(parse(&mut v, "\t false  \r\n").is_ok(), true);
         assert_eq!(v.fp_type, FPType::False);
     }
 
@@ -144,6 +235,15 @@ mod tests {
     fn test_parse_invalid_value() {
         test_parse_error!("nul", ParseError::InvalidValue);
         test_parse_error!("?", ParseError::InvalidValue);
+        // invalid number
+        test_parse_error!("+0", ParseError::InvalidValue);
+        test_parse_error!("+1", ParseError::InvalidValue);
+        test_parse_error!(".123", ParseError::InvalidValue);
+        test_parse_error!("1.", ParseError::InvalidValue);
+        test_parse_error!("INF", ParseError::InvalidValue);
+        test_parse_error!("inf", ParseError::InvalidValue);
+        test_parse_error!("NAN", ParseError::InvalidValue);
+        test_parse_error!("nan", ParseError::InvalidValue);
     }
 
     #[test]
@@ -151,15 +251,39 @@ mod tests {
         test_parse_error!("null x", ParseError::RootNotSingular);
         test_parse_error!("null ?", ParseError::RootNotSingular);
         test_parse_error!("null \r\n\tx", ParseError::RootNotSingular);
+        // invalid number
+        test_parse_error!("0123", ParseError::RootNotSingular);
+        test_parse_error!("0x0", ParseError::RootNotSingular);
+        test_parse_error!("0x123", ParseError::RootNotSingular);
+    }
 
-        let mut v = FPValue {
-            fp_type: FPType::False
-        };
+    #[test]
+    #[allow(clippy::cognitive_complexity)]
+    fn test_parse_number() {
+        test_parse_number!("0", 0.0);
+        test_parse_number!("-0", 0.0);
+        test_parse_number!("-0.0", 0.0);
+        test_parse_number!("1", 1.0);
+        test_parse_number!("-1.0", -1.0);
+        test_parse_number!("1.5", 1.5);
+        test_parse_number!("-1.5", -1.5);
+        test_parse_number!("4.1416", 4.1416);
+        test_parse_number!("1E10", 1E10);
+        test_parse_number!("1e10", 1e10);
+        test_parse_number!("1E+10", 1E+10);
+        test_parse_number!("1E-10", 1E-10);
+        test_parse_number!("-1E10", -1E10);
+        test_parse_number!("-1e10", -1e10);
+        test_parse_number!("-1E+10", -1E+10);
+        test_parse_number!("-1E-10", -1E-10);
+        test_parse_number!("1.234E+10", 1.234E+10);
+        test_parse_number!("1.234E-10", 1.234E-10);
+        test_parse_number!("1e-10000", 0.0);
+    }
 
-        assert_eq!(parse(&mut v, "null  \r\n").is_ok(), true);
-        assert_eq!(v.fp_type, FPType::Null);
-
-        assert_eq!(parse(&mut v, "\t true  \r\n").is_ok(), true);
-        assert_eq!(v.fp_type, FPType::True);
+    #[test]
+    fn test_parse_number_too_big() {
+        test_parse_error!("1e309", ParseError::NumberTooBig);
+        test_parse_error!("-1e309", ParseError::NumberTooBig);
     }
 }
