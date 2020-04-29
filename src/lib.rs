@@ -65,6 +65,17 @@ impl FPContext<'_> {
     fn parse_number(&mut self, value: &mut FPValue) -> Result<()> {
         let mut char_indices_iter = self.json.char_indices();
         let mut current = char_indices_iter.next();
+
+        macro_rules! assert_digit {
+            ($current:expr) => {
+            if !($current.is_some() && $current.unwrap().1.is_ascii_digit()) {
+                    let index = $current.unwrap_or((self.json.len(), char::default())).0;
+                    self.json = &self.json[index..];
+                    return Result::Err(ParseError::InvalidValue);
+                }
+            }
+        }
+
         // 负号处理
         if current.is_some() && current.unwrap().1 == '-' {
             current = char_indices_iter.next();
@@ -73,11 +84,7 @@ impl FPContext<'_> {
         if current.is_some() && current.unwrap().1 == '0' {
             current = char_indices_iter.next();
         } else {
-            if !(current.is_some() && current.unwrap().1.is_ascii_digit()) {
-                let index = current.unwrap_or((self.json.len(), char::default())).0;
-                self.json = &self.json[index..];
-                return Result::Err(ParseError::InvalidValue);
-            }
+            assert_digit!(current);
             while current.is_some() && current.unwrap().1.is_ascii_digit() {
                 current = char_indices_iter.next();
             }
@@ -85,11 +92,7 @@ impl FPContext<'_> {
         // 小数部分处理
         if current.is_some() && current.unwrap().1 == '.' {
             current = char_indices_iter.next();
-            if !(current.is_some() && current.unwrap().1.is_ascii_digit()) {
-                let index = current.unwrap_or((self.json.len(), char::default())).0;
-                self.json = &self.json[index..];
-                return Result::Err(ParseError::InvalidValue);
-            }
+            assert_digit!(current);
             while current.is_some() && current.unwrap().1.is_ascii_digit() {
                 current = char_indices_iter.next();
             }
@@ -100,11 +103,7 @@ impl FPContext<'_> {
             if current.is_some() && (current.unwrap().1 == '+' || current.unwrap().1 == '-') {
                 current = char_indices_iter.next();
             }
-            if !(current.is_some() && current.unwrap().1.is_ascii_digit()) {
-                let index = current.unwrap_or((self.json.len(), char::default())).0;
-                self.json = &self.json[index..];
-                return Result::Err(ParseError::InvalidValue);
-            }
+            assert_digit!(current);
             while current.is_some() && current.unwrap().1.is_ascii_digit() {
                 current = char_indices_iter.next();
             }
