@@ -6,7 +6,7 @@ enum FPType {
     False,
     True,
     Number(f64),
-    String,
+    String(String),
     Array,
     Object,
 }
@@ -22,18 +22,23 @@ pub enum ParseError {
     InvalidValue,
     RootNotSingular,
     NumberTooBig,
+    MissQuotationMark,
+    InvalidStringEscape,
+    InvalidStringChar,
 }
 
 type Result<T> = std::result::Result<T, ParseError>;
 
 struct FPContext<'a> {
     json: &'a str,
+    stack: Vec<char>,
 }
 
 impl FPContext<'_> {
     pub fn new(json: &str) -> FPContext {
         FPContext {
-            json
+            json,
+            stack: Vec::default(),
         }
     }
 
@@ -126,12 +131,69 @@ impl FPContext<'_> {
         }
     }
 
+    fn parse_string(&mut self, value: &mut FPValue) -> Result<()> {
+        let mut char_indices_iter = self.json.char_indices();
+        let first = char_indices_iter.next();
+        debug_assert!(first.unwrap().1 == '"');
+        while let Some((i, c)) = char_indices_iter.next() {
+            match c {
+                '\\' => {
+                    let next = char_indices_iter.next();
+                    if let Some((_, next_char)) = next {
+                        match next_char {
+                            '"' => self.stack.push(next_char),
+                            '\\' => self.stack.push(next_char),
+                            '/' => self.stack.push(next_char),
+                            'b' => self.stack.push(8 as char),
+                            'f' => self.stack.push(12 as char),
+                            'n' => self.stack.push('\n'),
+                            'r' => self.stack.push('\r'),
+                            't' => self.stack.push('\t'),
+                            _ => {
+                                self.json = &self.json[i + 2..];
+                                self.stack.clear();
+                                return Result::Err(ParseError::InvalidStringEscape);
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                '"' => {
+                    value.fp_type = FPType::String(self.stack.iter().collect());
+                    self.json = &self.json[i + 1..];
+                    self.stack.clear();
+                    return Result::Ok(());
+                }
+                '\0' => {
+                    self.json = &self.json[i + 1..];
+                    self.stack.clear();
+                    return Result::Err(ParseError::MissQuotationMark);
+                }
+                _ => {
+                    if c.escape_default().len() == 1 {
+                        self.stack.push(c);
+                    } else {
+                        self.json = &self.json[i + 1..];
+                        self.stack.clear();
+                        return Result::Err(ParseError::InvalidStringChar);
+                    }
+                }
+            }
+        }
+
+        self.json = &self.json[self.json.len()..];
+        self.stack.clear();
+        Result::Err(ParseError::MissQuotationMark)
+    }
+
     pub fn parse_value(&mut self, value: &mut FPValue) -> Result<()> {
         if let Some(c) = self.json.chars().next() {
             match c {
                 'n' => self.parse_literal(value, "null", FPType::Null),
                 't' => self.parse_literal(value, "true", FPType::True),
                 'f' => self.parse_literal(value, "false", FPType::False),
+                '"' => self.parse_string(value),
                 _ => self.parse_number(value),
             }
         } else {
@@ -182,6 +244,17 @@ mod tests {
 
             assert!(parse(&mut v, $json).is_ok());
             assert_eq!(v.fp_type, FPType::Number($number));
+        };
+    }
+
+    macro_rules! test_parse_string {
+        ($json:expr, $expect_str:expr) => {
+            let mut v = FPValue {
+                fp_type: FPType::False
+            };
+
+            assert!(parse(&mut v, $json).is_ok());
+            assert_eq!(v.fp_type, FPType::String(String::from($expect_str)));
         };
     }
 
@@ -293,5 +366,41 @@ mod tests {
     fn test_parse_number_too_big() {
         test_parse_error!("1e309", ParseError::NumberTooBig);
         test_parse_error!("-1e309", ParseError::NumberTooBig);
+    }
+
+    #[test]
+    fn test_parse_string() {
+        test_parse_string!("\"\"", "");
+        test_parse_string!("\"hello world\"", "hello world");
+        test_parse_string!("\"hello \\\"world\"", "hello \"world");
+        test_parse_string!("\"hello \\/world\"", "hello /world");
+        test_parse_string!("\"hello \\bworld\"", "hello \u{0008}world");
+        test_parse_string!("\"hello \\fworld\"", "hello \u{000C}world");
+        test_parse_string!("\"hello \\nworld\"", "hello \nworld");
+        test_parse_string!("\"hello \\rworld\"", "hello \rworld");
+        test_parse_string!("\"hello \\tworld\"", "hello \tworld");
+
+        test_parse_string!("\"\\\" \\\\ \\/ \\b \\f \\n \\r \\t\"", "\" \\ / \u{0008} \u{000C} \n \r \t" );
+    }
+
+    #[test]
+    fn test_parse_missing_quotation_mark() {
+        test_parse_error!("\"", ParseError::MissQuotationMark);
+        test_parse_error!("\"afjladflaf\01231231", ParseError::MissQuotationMark);
+        test_parse_error!("\"123ad", ParseError::MissQuotationMark);
+    }
+
+    #[test]
+    fn test_parse_invalid_string_escape() {
+        test_parse_error!("\"\\v\"", ParseError::InvalidStringEscape);
+        test_parse_error!("\"\\'\"", ParseError::InvalidStringEscape);
+        test_parse_error!("\"\\0\"", ParseError::InvalidStringEscape);
+        test_parse_error!("\"\\x12\"", ParseError::InvalidStringEscape);
+    }
+
+    #[test]
+    fn test_parse_invalid_string_char() {
+        test_parse_error!("\"\x01\"", ParseError::InvalidStringChar);
+        test_parse_error!("\"\x1F\"", ParseError::InvalidStringChar);
     }
 }
