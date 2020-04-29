@@ -63,53 +63,54 @@ impl FPContext<'_> {
     }
 
     fn parse_number(&mut self, value: &mut FPValue) -> Result<()> {
-        let mut char_indices_iter = self.json.char_indices();
-        let mut current = char_indices_iter.next();
-
         macro_rules! assert_digit {
             ($current:expr) => {
-            if !($current.is_some() && $current.unwrap().1.is_ascii_digit()) {
-                    let index = $current.unwrap_or((self.json.len(), char::default())).0;
+                if !$current.map_or(false, |(_, c)| c.is_ascii_digit()) {
+                    let (index, _) = $current.unwrap_or((self.json.len(), char::default()));
                     self.json = &self.json[index..];
                     return Result::Err(ParseError::InvalidValue);
                 }
             }
         }
 
+        let mut char_indices_iter = self.json.char_indices();
+        let mut current = char_indices_iter.next();
+
+
         // 负号处理
-        if current.is_some() && current.unwrap().1 == '-' {
+        if let Some((_, '-')) = current {
             current = char_indices_iter.next();
         }
         // 整数部分处理
-        if current.is_some() && current.unwrap().1 == '0' {
+        if let Some((_, '0')) = current {
             current = char_indices_iter.next();
         } else {
             assert_digit!(current);
-            while current.is_some() && current.unwrap().1.is_ascii_digit() {
+            while current.map_or(false, |(_, c)| c.is_ascii_digit()) {
                 current = char_indices_iter.next();
             }
         }
         // 小数部分处理
-        if current.is_some() && current.unwrap().1 == '.' {
+        if let Some((_, '.')) = current {
             current = char_indices_iter.next();
             assert_digit!(current);
-            while current.is_some() && current.unwrap().1.is_ascii_digit() {
+            while current.map_or(false, |(_, c)| c.is_ascii_digit()) {
                 current = char_indices_iter.next();
             }
         }
         // 指数部分处理
-        if current.is_some() && (current.unwrap().1 == 'e' || current.unwrap().1 == 'E') {
+        if current.map_or(false, |(_, c)| c == 'e' || c == 'E') {
             current = char_indices_iter.next();
-            if current.is_some() && (current.unwrap().1 == '+' || current.unwrap().1 == '-') {
+            if current.map_or(false, |(_, c)| c == '+' || c == '-') {
                 current = char_indices_iter.next();
             }
             assert_digit!(current);
-            while current.is_some() && current.unwrap().1.is_ascii_digit() {
+            while current.map_or(false, |(_, c)| c.is_ascii_digit()) {
                 current = char_indices_iter.next();
             }
         }
 
-        let index = current.unwrap_or((self.json.len(), char::default())).0;
+        let (index, _) = current.unwrap_or((self.json.len(), char::default()));
 
         if let Ok(number) = f64::from_str(&self.json[..index]) {
             if number.is_infinite() {
