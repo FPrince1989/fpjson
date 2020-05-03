@@ -132,14 +132,26 @@ impl FPContext<'_> {
     }
 
     fn parse_string(&mut self, value: &mut FPValue) -> Result<()> {
+        macro_rules! return_result {
+            ($iter:expr, $option_err:expr) => {
+                let index = $iter.next().map_or(self.json.len(), |(index, _)| index);
+                self.json = &self.json[index..];
+                self.stack.clear();
+                if $option_err.is_none() {
+                    return Result::Ok(())
+                } else {
+                    return Result::Err($option_err.unwrap())
+                }
+            }
+        }
+
         let mut char_indices_iter = self.json.char_indices();
         let first = char_indices_iter.next();
         debug_assert!(first.unwrap().1 == '"');
         while let Some((i, c)) = char_indices_iter.next() {
             match c {
                 '\\' => {
-                    let next = char_indices_iter.next();
-                    if let Some((_, next_char)) = next {
+                    if let Some((_, next_char)) = char_indices_iter.next() {
                         match next_char {
                             '"' => self.stack.push(next_char),
                             '\\' => self.stack.push(next_char),
@@ -150,9 +162,7 @@ impl FPContext<'_> {
                             'r' => self.stack.push('\r'),
                             't' => self.stack.push('\t'),
                             _ => {
-                                self.json = &self.json[i + 2..];
-                                self.stack.clear();
-                                return Result::Err(ParseError::InvalidStringEscape);
+                                return_result!(char_indices_iter, Some(ParseError::InvalidStringEscape));
                             }
                         }
                     } else {
@@ -161,30 +171,22 @@ impl FPContext<'_> {
                 }
                 '"' => {
                     value.fp_type = FPType::String(self.stack.iter().collect());
-                    self.json = &self.json[i + 1..];
-                    self.stack.clear();
-                    return Result::Ok(());
+                    return_result!(char_indices_iter, Option::<ParseError>::None);
                 }
                 '\0' => {
-                    self.json = &self.json[i + 1..];
-                    self.stack.clear();
-                    return Result::Err(ParseError::MissQuotationMark);
+                    return_result!(char_indices_iter, Some(ParseError::MissQuotationMark));
                 }
                 _ => {
-                    if c.escape_default().len() == 1 {
+                    if c >= '\x20' {
                         self.stack.push(c);
                     } else {
-                        self.json = &self.json[i + 1..];
-                        self.stack.clear();
-                        return Result::Err(ParseError::InvalidStringChar);
+                        return_result!(char_indices_iter, Some(ParseError::InvalidStringChar));
                     }
                 }
             }
         }
 
-        self.json = &self.json[self.json.len()..];
-        self.stack.clear();
-        Result::Err(ParseError::MissQuotationMark)
+        return_result!(char_indices_iter, Some(ParseError::MissQuotationMark));
     }
 
     pub fn parse_value(&mut self, value: &mut FPValue) -> Result<()> {
@@ -379,6 +381,8 @@ mod tests {
         test_parse_string!("\"hello \\nworld\"", "hello \nworld");
         test_parse_string!("\"hello \\rworld\"", "hello \rworld");
         test_parse_string!("\"hello \\tworld\"", "hello \tworld");
+        test_parse_string!("\"hello 𝄞 world\"", "hello 𝄞 world");
+        test_parse_string!("\"𝄞\"", "𝄞");
 
         test_parse_string!("\"\\\" \\\\ \\/ \\b \\f \\n \\r \\t\"", "\" \\ / \u{0008} \u{000C} \n \r \t" );
     }
