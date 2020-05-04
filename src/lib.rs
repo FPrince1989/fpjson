@@ -2,19 +2,14 @@ use std::convert::TryFrom;
 use std::str::{CharIndices, FromStr};
 
 #[derive(Debug, PartialEq)]
-enum FPType {
+pub enum FPValue {
     Null,
     False,
     True,
     Number(f64),
     String(String),
-    Array,
+    Array(Vec<FPValue>),
     Object,
-}
-
-#[derive(Debug)]
-pub struct FPValue {
-    fp_type: FPType,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -29,6 +24,7 @@ pub enum ParseError {
     InvalidUnicodeHex,
     InvalidUnicodeSurrogate,
     InvalidUTF8,
+    MissCommaOrSquareBracket,
 }
 
 type Result<T> = std::result::Result<T, ParseError>;
@@ -59,11 +55,16 @@ impl FPContext<'_> {
         Result::Ok(())
     }
 
-    fn parse_literal(&mut self, value: &mut FPValue, literal: &str, fp_type: FPType) -> Result<()> {
+    fn parse_literal(
+        &mut self,
+        value: &mut FPValue,
+        literal: &str,
+        fp_value: FPValue,
+    ) -> Result<()> {
         let len = literal.len();
         if self.json.len() >= len && &self.json[0..len] == literal {
             self.json = &self.json[len..];
-            value.fp_type = fp_type;
+            *value = fp_value;
 
             Result::Ok(())
         } else {
@@ -124,7 +125,7 @@ impl FPContext<'_> {
             if number.is_infinite() {
                 return Result::Err(ParseError::NumberTooBig);
             }
-            value.fp_type = FPType::Number(number);
+            *value = FPValue::Number(number);
             self.json = &self.json[index..];
 
             Result::Ok(())
@@ -148,10 +149,10 @@ impl FPContext<'_> {
                 }
             };
         }
+        debug_assert!(self.json.starts_with('"'));
 
         let mut char_indices_iter = self.json.char_indices();
-        let first = char_indices_iter.next();
-        debug_assert!(first.unwrap().1 == '"');
+        char_indices_iter.next();
         while let Some((_, c)) = char_indices_iter.next() {
             match c {
                 '\\' => {
@@ -167,28 +168,21 @@ impl FPContext<'_> {
                                 let high_surrogate = FPContext::parse_hex4(&mut char_indices_iter)?;
                                 let mut code_point = high_surrogate as u32;
                                 if high_surrogate >= 0xD800 && high_surrogate <= 0xDBFF {
-                                    if char_indices_iter.next().map_or(true, |(_, c)| c != '\\')
-                                        || char_indices_iter.next().map_or(true, |(_, c)| c != 'u')
-                                    {
-                                        return_result!(
-                                            char_indices_iter,
-                                            Some(ParseError::InvalidUnicodeSurrogate)
-                                        );
-                                    }
-                                    if let Ok(low_surrogate) =
-                                        FPContext::parse_hex4(&mut char_indices_iter)
-                                    {
-                                        if low_surrogate >= 0xDC00 && low_surrogate <= 0xDFFF {
-                                            code_point = 0x10000
-                                                + (high_surrogate as u32 - 0xD800) * 0x400
-                                                + (low_surrogate as u32 - 0xDC00);
-                                        } else {
-                                            return_result!(
-                                                char_indices_iter,
-                                                Some(ParseError::InvalidUnicodeSurrogate)
-                                            );
-                                        }
-                                    } else {
+                                    let success =
+                                        char_indices_iter.next().map_or(false, |(_, c)| c == '\\')
+                                            && char_indices_iter
+                                                .next()
+                                                .map_or(false, |(_, c)| c == 'u')
+                                            && match FPContext::parse_hex4(&mut char_indices_iter) {
+                                                Ok(low_surrogate @ 0xDC00..=0xDFFF) => {
+                                                    code_point = 0x10000
+                                                        + (high_surrogate as u32 - 0xD800) * 0x400
+                                                        + (low_surrogate as u32 - 0xDC00);
+                                                    true
+                                                }
+                                                _ => false,
+                                            };
+                                    if !success {
                                         return_result!(
                                             char_indices_iter,
                                             Some(ParseError::InvalidUnicodeSurrogate)
@@ -216,7 +210,7 @@ impl FPContext<'_> {
                     }
                 }
                 '"' => {
-                    value.fp_type = FPType::String(self.stack.iter().collect());
+                    *value = FPValue::String(self.stack.iter().collect());
                     return_result!(char_indices_iter, Option::<ParseError>::None);
                 }
                 '\0' => {
@@ -238,44 +232,73 @@ impl FPContext<'_> {
     fn parse_hex4(char_indices: &mut CharIndices) -> Result<u16> {
         let mut result = 0;
         for _ in 0..4 {
-            if let Some((_, c)) = char_indices.next() {
-                if let Some(d) = c.to_digit(16) {
+            let success = char_indices.next().map_or(false, |(_, c)| {
+                c.to_digit(16).map_or(false, |d| {
                     result <<= 4;
                     result += d as u16;
-                } else {
-                    return Result::Err(ParseError::InvalidUnicodeHex);
-                }
-            } else {
+                    true
+                })
+            });
+            if !success {
                 return Result::Err(ParseError::InvalidUnicodeHex);
             }
         }
         Result::Ok(result)
     }
 
-    pub fn parse_value(&mut self, value: &mut FPValue) -> Result<()> {
-        if let Some(c) = self.json.chars().next() {
-            match c {
-                'n' => self.parse_literal(value, "null", FPType::Null),
-                't' => self.parse_literal(value, "true", FPType::True),
-                'f' => self.parse_literal(value, "false", FPType::False),
-                '"' => self.parse_string(value),
-                _ => self.parse_number(value),
+    fn parse_array(&mut self, value: &mut FPValue) -> Result<()> {
+        debug_assert!(self.json.starts_with('['));
+        self.json = &self.json[1..];
+        let mut array = vec![];
+        self.parse_whitespace()?;
+        if let Some((i, ']')) = self.json.char_indices().next() {
+            self.json = &self.json[i + 1..];
+            *value = FPValue::Array(array);
+            return Result::Ok(());
+        }
+        loop {
+            self.parse_whitespace()?;
+            let mut temp_value = FPValue::Null;
+            self.parse_value(&mut temp_value)?;
+            array.push(temp_value);
+            self.parse_whitespace()?;
+            let mut char_indices_iter = self.json.char_indices();
+            match char_indices_iter.next() {
+                Some((i, ',')) => self.json = &self.json[i + 1..],
+                Some((i, ']')) => {
+                    self.json = &self.json[i + 1..];
+                    *value = FPValue::Array(array);
+                    return Result::Ok(());
+                }
+                _ => {
+                    return Result::Err(ParseError::MissCommaOrSquareBracket);
+                }
             }
-        } else {
-            Result::Err(ParseError::ExpectValue)
+        }
+    }
+
+    pub fn parse_value(&mut self, value: &mut FPValue) -> Result<()> {
+        match self.json.chars().next() {
+            None => Result::Err(ParseError::ExpectValue),
+            Some('n') => self.parse_literal(value, "null", FPValue::Null),
+            Some('t') => self.parse_literal(value, "true", FPValue::True),
+            Some('f') => self.parse_literal(value, "false", FPValue::False),
+            Some('"') => self.parse_string(value),
+            Some('[') => self.parse_array(value),
+            _ => self.parse_number(value),
         }
     }
 }
 
 pub fn parse(value: &mut FPValue, json: &'static str) -> Result<()> {
     let mut context = FPContext::new(json);
-    value.fp_type = FPType::Null;
+    *value = FPValue::Null;
     context.parse_whitespace()?;
     match context.parse_value(value) {
         Ok(()) => {
             context.parse_whitespace()?;
             if !context.json.is_empty() {
-                value.fp_type = FPType::Null;
+                *value = FPValue::Null;
                 Result::Err(ParseError::RootNotSingular)
             } else {
                 Result::Ok(())
@@ -288,78 +311,75 @@ pub fn parse(value: &mut FPValue, json: &'static str) -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::cognitive_complexity)]
 mod tests {
-    use crate::{parse, FPType, FPValue, ParseError};
+    use crate::{parse, FPValue, ParseError};
 
     macro_rules! test_parse_error {
         ($json:expr, $error:expr) => {
-            let mut v = FPValue {
-                fp_type: FPType::False,
-            };
+            let mut v = FPValue::False;
 
             assert_eq!(parse(&mut v, $json).unwrap_err(), $error);
-            assert_eq!(v.fp_type, FPType::Null);
+            assert_eq!(v, FPValue::Null);
         };
     }
 
     macro_rules! test_parse_number {
         ($json:expr, $number:expr) => {
-            let mut v = FPValue {
-                fp_type: FPType::False,
-            };
+            let mut v = FPValue::Null;
 
             assert!(parse(&mut v, $json).is_ok());
-            assert_eq!(v.fp_type, FPType::Number($number));
+            assert_eq!(v, FPValue::Number($number));
         };
     }
 
     macro_rules! test_parse_string {
         ($json:expr, $expect_str:expr) => {
-            let mut v = FPValue {
-                fp_type: FPType::False,
-            };
+            let mut v = FPValue::Null;
 
             assert!(parse(&mut v, $json).is_ok());
-            assert_eq!(v.fp_type, FPType::String(String::from($expect_str)));
+            assert_eq!(v, FPValue::String(String::from($expect_str)));
+        };
+    }
+
+    macro_rules! test_parse_array {
+        ($json:expr, $vec:expr) => {
+            let mut v = FPValue::Null;
+
+            assert!(parse(&mut v, $json).is_ok());
+            assert_eq!(v, FPValue::Array($vec));
         };
     }
 
     #[test]
     fn test_parse_null() {
-        let mut v = FPValue {
-            fp_type: FPType::False,
-        };
+        let mut v = FPValue::Null;
         assert!(parse(&mut v, "null").is_ok());
-        assert_eq!(v.fp_type, FPType::Null);
+        assert_eq!(v, FPValue::Null);
 
-        v.fp_type = FPType::False;
+        v = FPValue::False;
         assert_eq!(parse(&mut v, "null  \r\n").is_ok(), true);
-        assert_eq!(v.fp_type, FPType::Null);
+        assert_eq!(v, FPValue::Null);
     }
 
     #[test]
     fn test_parse_true() {
-        let mut v = FPValue {
-            fp_type: FPType::Null,
-        };
+        let mut v = FPValue::Null;
         assert!(parse(&mut v, "true").is_ok());
-        assert_eq!(v.fp_type, FPType::True);
+        assert_eq!(v, FPValue::True);
 
-        v.fp_type = FPType::Null;
+        v = FPValue::Null;
         assert_eq!(parse(&mut v, "\t true  \r\n").is_ok(), true);
-        assert_eq!(v.fp_type, FPType::True);
+        assert_eq!(v, FPValue::True);
     }
 
     #[test]
     fn test_parse_false() {
-        let mut v = FPValue {
-            fp_type: FPType::True,
-        };
+        let mut v = FPValue::Null;
         assert_eq!(parse(&mut v, "false").is_ok(), true);
-        assert_eq!(v.fp_type, FPType::False);
+        assert_eq!(v, FPValue::False);
 
-        v.fp_type = FPType::Null;
+        v = FPValue::Null;
         assert_eq!(parse(&mut v, "\t false  \r\n").is_ok(), true);
-        assert_eq!(v.fp_type, FPType::False);
+        assert_eq!(v, FPValue::False);
     }
 
     #[test]
@@ -503,5 +523,50 @@ mod tests {
         test_parse_error!("\"\\uD800\\\\\"", ParseError::InvalidUnicodeSurrogate);
         test_parse_error!("\"\\uD800\\uDBFF\"", ParseError::InvalidUnicodeSurrogate);
         test_parse_error!("\"\\uD800\\uE000\"", ParseError::InvalidUnicodeSurrogate);
+    }
+
+    #[test]
+    fn test_parse_miss_comma_or_square_bracket() {
+        test_parse_error!("[  1", ParseError::MissCommaOrSquareBracket);
+        test_parse_error!("[  1  , [1,2 ,3]", ParseError::MissCommaOrSquareBracket);
+    }
+
+    #[test]
+    fn test_parse_array() {
+        test_parse_array!("[ ]", vec![]);
+        test_parse_array!(
+            "[1, [1, 2, \"3\"]]",
+            vec![
+                FPValue::Number(1.0),
+                FPValue::Array(vec![
+                    FPValue::Number(1.0),
+                    FPValue::Number(2.0),
+                    FPValue::String("3".to_string())
+                ])
+            ]
+        );
+        test_parse_array!(
+            "[ null , false , true , 123 , \"abc\" ]",
+            vec![
+                FPValue::Null,
+                FPValue::False,
+                FPValue::True,
+                FPValue::Number(123.0),
+                FPValue::String("abc".to_string())
+            ]
+        );
+        test_parse_array!(
+            "[ [ ] , [ 0 ] , [ 0 , 1 ] , [ 0 , 1 , 2 ] ]",
+            vec![
+                FPValue::Array(vec![]),
+                FPValue::Array(vec![FPValue::Number(0.0)]),
+                FPValue::Array(vec![FPValue::Number(0.0), FPValue::Number(1.0)]),
+                FPValue::Array(vec![
+                    FPValue::Number(0.0),
+                    FPValue::Number(1.0),
+                    FPValue::Number(2.0)
+                ]),
+            ]
+        );
     }
 }
