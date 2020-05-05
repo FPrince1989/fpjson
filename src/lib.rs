@@ -59,24 +59,18 @@ impl FPContext<'_> {
         Result::Ok(())
     }
 
-    fn parse_literal(
-        &mut self,
-        value: &mut FPValue,
-        literal: &str,
-        fp_value: FPValue,
-    ) -> Result<()> {
+    fn parse_literal(&mut self, literal: &str, fp_value: FPValue) -> Result<FPValue> {
         let len = literal.len();
         if self.json.len() >= len && &self.json[0..len] == literal {
             self.json = &self.json[len..];
-            *value = fp_value;
 
-            Result::Ok(())
+            Result::Ok(fp_value)
         } else {
             Result::Err(ParseError::InvalidValue)
         }
     }
 
-    fn parse_number(&mut self, value: &mut FPValue) -> Result<()> {
+    fn parse_number(&mut self) -> Result<FPValue> {
         macro_rules! assert_digit {
             ($current:expr) => {
                 if !$current.map_or(false, |(_, c)| c.is_ascii_digit()) {
@@ -129,10 +123,9 @@ impl FPContext<'_> {
             if number.is_infinite() {
                 return Result::Err(ParseError::NumberTooBig);
             }
-            *value = FPValue::Number(number);
             self.json = &self.json[index..];
 
-            Result::Ok(())
+            Result::Ok(FPValue::Number(number))
         } else {
             self.json = &self.json[index..];
             Result::Err(ParseError::InvalidValue)
@@ -140,19 +133,22 @@ impl FPContext<'_> {
     }
 
     //noinspection RsExtraSemicolon
-    fn parse_string(&mut self, value: &mut FPValue) -> Result<()> {
+    fn parse_string(&mut self) -> Result<FPValue> {
         macro_rules! return_result {
             ($iter:expr, $option_err:expr) => {
                 let index = $iter.next().map_or(self.json.len(), |(index, _)| index);
                 self.json = &self.json[index..];
-                self.stack.clear();
                 if $option_err.is_none() {
-                    return Result::Ok(());
+                    let str = self.stack.iter().collect::<String>();
+                    self.stack.clear();
+                    return Result::Ok(FPValue::String(str));
                 } else {
+                    self.stack.clear();
                     return Result::Err($option_err.unwrap());
                 }
             };
         }
+
         debug_assert!(self.json.starts_with('"'));
 
         let mut iter = self.json.char_indices();
@@ -205,7 +201,6 @@ impl FPContext<'_> {
                     }
                 }
                 '"' => {
-                    *value = FPValue::String(self.stack.iter().collect());
                     return_result!(iter, Option::<ParseError>::None);
                 }
                 '\0' => {
@@ -241,20 +236,17 @@ impl FPContext<'_> {
         Result::Ok(result)
     }
 
-    fn parse_array(&mut self, value: &mut FPValue) -> Result<()> {
+    fn parse_array(&mut self) -> Result<FPValue> {
         debug_assert!(self.json.starts_with('['));
         self.json = &self.json[1..];
         let mut array = vec![];
         self.parse_whitespace()?;
         if let Some((i, ']')) = self.json.char_indices().next() {
             self.json = &self.json[i + 1..];
-            *value = FPValue::Array(array);
-            return Result::Ok(());
+            return Result::Ok(FPValue::Array(array));
         }
         loop {
-            let mut temp_value = FPValue::Null;
-            self.parse_value(&mut temp_value)?;
-            array.push(temp_value);
+            array.push(self.parse_value()?);
             self.parse_whitespace()?;
             let mut iter = self.json.char_indices();
             match iter.next() {
@@ -264,8 +256,7 @@ impl FPContext<'_> {
                 }
                 Some((i, ']')) => {
                     self.json = &self.json[i + 1..];
-                    *value = FPValue::Array(array);
-                    return Result::Ok(());
+                    return Result::Ok(FPValue::Array(array));
                 }
                 _ => {
                     return Result::Err(ParseError::MissCommaOrSquareBracket);
@@ -274,23 +265,24 @@ impl FPContext<'_> {
         }
     }
 
-    fn parse_object(&mut self, value: &mut FPValue) -> Result<()> {
+    fn parse_object(&mut self) -> Result<FPValue> {
         debug_assert!(self.json.starts_with('{'));
         self.json = &self.json[1..];
         let mut map = HashMap::new();
         self.parse_whitespace()?;
         if let Some((i, '}')) = self.json.char_indices().next() {
             self.json = &self.json[i + 1..];
-            *value = FPValue::Object(map);
-            return Result::Ok(());
+            return Result::Ok(FPValue::Object(map));
         }
         loop {
-            let mut map_key = FPValue::Null;
             if !self.json.starts_with('"') {
                 return Result::Err(ParseError::MissKey);
             }
 
-            self.parse_string(&mut map_key)?;
+            let map_key = match self.parse_string()? {
+                FPValue::String(str) => str,
+                _ => unreachable!(),
+            };
             self.parse_whitespace()?;
             if self.json.starts_with(':') {
                 self.json = &self.json[1..];
@@ -299,13 +291,7 @@ impl FPContext<'_> {
                 return Result::Err(ParseError::MissColon);
             }
 
-            let mut map_value = FPValue::Null;
-            self.parse_value(&mut map_value)?;
-            let map_key = match map_key {
-                FPValue::String(s) => s,
-                _ => unreachable!(),
-            };
-            map.insert(map_key, map_value);
+            map.insert(map_key, self.parse_value()?);
             self.parse_whitespace()?;
             let mut iter = self.json.char_indices();
             match iter.next() {
@@ -315,8 +301,7 @@ impl FPContext<'_> {
                 }
                 Some((i, '}')) => {
                     self.json = &self.json[i + 1..];
-                    *value = FPValue::Object(map);
-                    return Result::Ok(());
+                    return Result::Ok(FPValue::Object(map));
                 }
                 _ => {
                     return Result::Err(ParseError::MissCommaOrCurlyBracket);
@@ -325,32 +310,30 @@ impl FPContext<'_> {
         }
     }
 
-    pub fn parse_value(&mut self, value: &mut FPValue) -> Result<()> {
+    pub fn parse_value(&mut self) -> Result<FPValue> {
         match self.json.chars().next() {
             None => Result::Err(ParseError::ExpectValue),
-            Some('n') => self.parse_literal(value, "null", FPValue::Null),
-            Some('t') => self.parse_literal(value, "true", FPValue::True),
-            Some('f') => self.parse_literal(value, "false", FPValue::False),
-            Some('"') => self.parse_string(value),
-            Some('[') => self.parse_array(value),
-            Some('{') => self.parse_object(value),
-            _ => self.parse_number(value),
+            Some('n') => self.parse_literal("null", FPValue::Null),
+            Some('t') => self.parse_literal("true", FPValue::True),
+            Some('f') => self.parse_literal("false", FPValue::False),
+            Some('"') => self.parse_string(),
+            Some('[') => self.parse_array(),
+            Some('{') => self.parse_object(),
+            _ => self.parse_number(),
         }
     }
 }
 
-pub fn parse(value: &mut FPValue, json: &'static str) -> Result<()> {
+pub fn parse(json: &'static str) -> Result<FPValue> {
     let mut context = FPContext::new(json);
-    *value = FPValue::Null;
     context.parse_whitespace()?;
-    match context.parse_value(value) {
-        Ok(()) => {
+    match context.parse_value() {
+        Ok(value) => {
             context.parse_whitespace()?;
             if !context.json.is_empty() {
-                *value = FPValue::Null;
                 Result::Err(ParseError::RootNotSingular)
             } else {
-                Result::Ok(())
+                Result::Ok(value)
             }
         }
         Err(e) => Result::Err(e),
@@ -365,80 +348,73 @@ mod tests {
 
     macro_rules! test_parse_error {
         ($json:expr, $error:expr) => {
-            let mut v = FPValue::False;
-
-            assert_eq!(parse(&mut v, $json).unwrap_err(), $error);
-            assert_eq!(v, FPValue::Null);
+            assert_eq!(parse($json).unwrap_err(), $error);
         };
     }
 
     macro_rules! test_parse_number {
         ($json:expr, $number:expr) => {
-            let mut v = FPValue::Null;
-
-            assert!(parse(&mut v, $json).is_ok());
-            assert_eq!(v, FPValue::Number($number));
+            let result = parse($json);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), FPValue::Number($number));
         };
     }
 
     macro_rules! test_parse_string {
         ($json:expr, $expect_str:expr) => {
-            let mut v = FPValue::Null;
-
-            assert!(parse(&mut v, $json).is_ok());
-            assert_eq!(v, FPValue::String(String::from($expect_str)));
+            let result = parse($json);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), FPValue::String(String::from($expect_str)));
         };
     }
 
     macro_rules! test_parse_array {
         ($json:expr, $vec:expr) => {
-            let mut v = FPValue::Null;
-
-            assert!(parse(&mut v, $json).is_ok());
-            assert_eq!(v, FPValue::Array($vec));
+            let result = parse($json);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), FPValue::Array($vec));
         };
     }
 
     macro_rules! test_parse_object {
         ($json:expr, $map:expr) => {
-            let mut v = FPValue::Null;
-
-            assert!(parse(&mut v, $json).is_ok());
-            assert_eq!(v, FPValue::Object($map));
+            let result = parse($json);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), FPValue::Object($map));
         };
     }
 
     #[test]
     fn test_parse_null() {
-        let mut v = FPValue::Null;
-        assert!(parse(&mut v, "null").is_ok());
-        assert_eq!(v, FPValue::Null);
+        let result = parse("null");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), FPValue::Null);
 
-        v = FPValue::False;
-        assert_eq!(parse(&mut v, "null  \r\n").is_ok(), true);
-        assert_eq!(v, FPValue::Null);
+        let result = parse("null \r\t");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), FPValue::Null);
     }
 
     #[test]
     fn test_parse_true() {
-        let mut v = FPValue::Null;
-        assert!(parse(&mut v, "true").is_ok());
-        assert_eq!(v, FPValue::True);
+        let result = parse("true");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), FPValue::True);
 
-        v = FPValue::Null;
-        assert_eq!(parse(&mut v, "\t true  \r\n").is_ok(), true);
-        assert_eq!(v, FPValue::True);
+        let result = parse("\t true  \r\n");
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap(), FPValue::True);
     }
 
     #[test]
     fn test_parse_false() {
-        let mut v = FPValue::Null;
-        assert_eq!(parse(&mut v, "false").is_ok(), true);
-        assert_eq!(v, FPValue::False);
+        let result = parse("false");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), FPValue::False);
 
-        v = FPValue::Null;
-        assert_eq!(parse(&mut v, "\t false  \r\n").is_ok(), true);
-        assert_eq!(v, FPValue::False);
+        let result = parse("\t false  \r\n");
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap(), FPValue::False);
     }
 
     #[test]
