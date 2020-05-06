@@ -324,7 +324,84 @@ impl FPContext<'_> {
     }
 }
 
-pub fn parse(json: &'static str) -> Result<FPValue> {
+impl FPValue {
+    pub fn stringify(&self) -> String {
+        match self {
+            FPValue::Null => String::from("null"),
+            FPValue::True => String::from("true"),
+            FPValue::False => String::from("false"),
+            FPValue::Number(n) => format!("{}", n),
+            FPValue::String(s) => FPValue::stringify_string(s),
+            FPValue::Array(vec) => {
+                let mut result = String::from("[");
+                for (i, value) in vec.iter().enumerate() {
+                    if i > 0 {
+                        result.push(',');
+                    }
+                    result.push_str(value.stringify().as_str());
+                }
+                result.push(']');
+                result
+            }
+            FPValue::Object(map) => {
+                let mut result = String::from("{");
+                for (i, (k, v)) in map.iter().enumerate() {
+                    if i > 0 {
+                        result.push(',');
+                    }
+                    result.push_str(
+                        format!(
+                            "{}:{}",
+                            FPValue::stringify_string(k.as_str()),
+                            v.stringify()
+                        )
+                        .as_str(),
+                    );
+                }
+                result.push('}');
+                result
+            }
+        }
+    }
+
+    fn stringify_string(s: &str) -> String {
+        let mut result = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' | '/' | '\\' => {
+                    result.push('\\');
+                    result.push(c);
+                }
+                '\t' => {
+                    result.push('\\');
+                    result.push('t');
+                }
+                '\r' => {
+                    result.push('\\');
+                    result.push('r');
+                }
+                '\n' => {
+                    result.push('\\');
+                    result.push('n');
+                }
+                '\x08' => {
+                    result.push('\\');
+                    result.push('b');
+                }
+                '\x0C' => {
+                    result.push('\\');
+                    result.push('f');
+                }
+                c if c < '\x20' => result.push_str(format!("\\u00{:02x}", c as u8).as_str()),
+                _ => result.push(c),
+            }
+        }
+        result.push('"');
+        result
+    }
+}
+
+pub fn parse(json: &str) -> Result<FPValue> {
     let mut context = FPContext::new(json);
     context.parse_whitespace()?;
     match context.parse_value() {
@@ -381,6 +458,15 @@ mod tests {
             let result = parse($json);
             assert!(result.is_ok());
             assert_eq!(result.unwrap(), FPValue::Object($map));
+        };
+    }
+
+    macro_rules! test_roundtrip {
+        ($json:expr) => {
+            let result = parse($json).unwrap();
+            let t = result.stringify();
+            let result2 = parse(t.as_str()).unwrap();
+            assert_eq!(result, result2);
         };
     }
 
@@ -681,5 +767,61 @@ mod tests {
          } ",
             result
         );
+    }
+
+    #[test]
+    fn test_stringify_literal() {
+        test_roundtrip!("null");
+        test_roundtrip!("true");
+        test_roundtrip!("false");
+    }
+
+    #[test]
+    fn test_stringify_number() {
+        test_roundtrip!("0");
+        test_roundtrip!("-0");
+        test_roundtrip!("1");
+        test_roundtrip!("-1");
+        test_roundtrip!("1.5");
+        test_roundtrip!("-1.5");
+        test_roundtrip!("3.25");
+        test_roundtrip!("1e+20");
+        test_roundtrip!("1.234e+20");
+        test_roundtrip!("1.234e-20");
+        test_roundtrip!("1.0000000000000002"); /* the smallest number > 1 */
+        test_roundtrip!("4.9406564584124654e-324"); /* minimum denormal */
+        test_roundtrip!("-4.9406564584124654e-324");
+        test_roundtrip!("2.2250738585072009e-308"); /* Max subnormal double */
+        test_roundtrip!("-2.2250738585072009e-308");
+        test_roundtrip!("2.2250738585072014e-308"); /* Min normal positive double */
+        test_roundtrip!("-2.2250738585072014e-308");
+        test_roundtrip!("1.7976931348623157e+308"); /* Max double */
+        test_roundtrip!("-1.7976931348623157e+308");
+    }
+
+    #[test]
+    fn test_stringify_string() {
+        test_roundtrip!("\"hello 𝄞 world\"");
+        test_roundtrip!("\"\"");
+        test_roundtrip!("\"Hello\"");
+        test_roundtrip!("\"Hello\\nWorld\"");
+        test_roundtrip!("\"\\\" \\\\ / \\b \\f \\n \\r \\t\"");
+        test_roundtrip!("\"Hello\\u0000World\"");
+        test_roundtrip!("\"Hello\\u0019World\"");
+    }
+
+    #[test]
+    fn test_stringify_array() {
+        test_roundtrip!("[1,2,3]");
+        test_roundtrip!("[1,[2,null,[true],false],3]");
+        test_roundtrip!("[]");
+        test_roundtrip!("[null,false,true,123,\"abc\",[1,2,3]]");
+    }
+
+    #[test]
+    fn test_stringify_object() {
+        test_roundtrip!("{\"1\":1}");
+        test_roundtrip!("{}");
+        test_roundtrip!("{\"n\":null,\"f\":false,\"t\":true,\"i\":123,\"s\":\"abc\",\"a\":[1,2,3],\"o\":{\"1\":1,\"2\":2,\"3\":3}}");
     }
 }
